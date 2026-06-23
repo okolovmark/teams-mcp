@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +12,7 @@ import {
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { cachePlugin } from "./msal-cache.js";
-import { FULL_SCOPES, GraphService, READ_ONLY_SCOPES } from "./services/graph.js";
+import { CLI_INVOCATION, FULL_SCOPES, GraphService, READ_ONLY_SCOPES } from "./services/graph.js";
 import { registerAuthTools } from "./tools/auth.js";
 import { registerChatTools } from "./tools/chats.js";
 import { registerSearchTools } from "./tools/search.js";
@@ -39,8 +40,17 @@ async function readAuthInfo(): Promise<Record<string, unknown> | undefined> {
   }
 }
 
+/** Open a URL in the user's default browser (cross-platform; Linux uses xdg-open). */
+async function openBrowser(url: string): Promise<void> {
+  const command =
+    process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+  const browserArgs = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  const child = spawn(command, browserArgs, { detached: true, stdio: "ignore" });
+  child.unref();
+}
+
 // Authentication functions
-async function authenticate(readOnly: boolean) {
+async function authenticate(readOnly: boolean, useDeviceCode: boolean) {
   const scopes = readOnly ? READ_ONLY_SCOPES : FULL_SCOPES;
   const modeLabel = readOnly ? "read-only" : "full access";
 
@@ -49,8 +59,6 @@ async function authenticate(readOnly: boolean) {
   console.log(`Using Microsoft Graph CLI app (${modeLabel})`);
 
   try {
-    console.log("\n📱 Using device code flow...");
-
     const msalConfig: Configuration = {
       auth: {
         clientId: CLIENT_ID,
@@ -63,15 +71,33 @@ async function authenticate(readOnly: boolean) {
 
     const client = new PublicClientApplication(msalConfig);
 
-    const result: AuthenticationResult | null = await client.acquireTokenByDeviceCode({
-      scopes,
-      deviceCodeCallback: (response) => {
-        console.log("\n📱 Please complete authentication:");
-        console.log(`🌐 Visit: ${response.verificationUri}`);
-        console.log(`🔑 Enter code: ${response.userCode}`);
-        console.log("\n⏳ Waiting for you to complete authentication...");
-      },
-    });
+    let result: AuthenticationResult | null;
+    if (useDeviceCode) {
+      console.log("\n📱 Using device code flow...");
+      result = await client.acquireTokenByDeviceCode({
+        scopes,
+        deviceCodeCallback: (response) => {
+          console.log("\n📱 Please complete authentication:");
+          console.log(`🌐 Visit: ${response.verificationUri}`);
+          console.log(`🔑 Enter code: ${response.userCode}`);
+          console.log("\n⏳ Waiting for you to complete authentication...");
+        },
+      });
+    } else {
+      // Default: interactive auth-code + PKCE. Opens the browser and captures the
+      // redirect on a loopback port — no device code to copy/paste, so a passkey
+      // sign-in is a single tap.
+      console.log("\n🌐 Opening your browser for interactive sign-in...");
+      console.log("   Complete it with your passkey, then return here.");
+      console.log("   (No local browser? Re-run with --device-code.)");
+      result = await client.acquireTokenInteractive({
+        scopes,
+        openBrowser,
+        successTemplate:
+          "Authentication complete. You can close this tab and return to the terminal.",
+        errorTemplate: "Authentication failed. Check the terminal for details.",
+      });
+    }
 
     if (result) {
       // Save authentication info (for quick status checks via CLI)
@@ -103,6 +129,9 @@ async function authenticate(readOnly: boolean) {
     } else if (errorMessage.includes("AADSTS65001")) {
       console.error("\n❌ Authentication failed: Admin consent required");
       console.error("   Grant admin consent for the required permissions in Azure Portal");
+    } else if (errorMessage.includes("AADSTS50011")) {
+      console.error("\n❌ Authentication failed: redirect URI mismatch (interactive flow)");
+      console.error("   Try the device code flow instead: authenticate --device-code");
     } else {
       console.error("\n❌ Authentication failed:", errorMessage);
     }
@@ -176,7 +205,7 @@ async function logout() {
   }
 
   console.log("✅ Successfully logged out");
-  console.log("🔄 Run 'npx @floriscornel/teams-mcp@latest authenticate' to re-authenticate");
+  console.log(`🔄 Run '${CLI_INVOCATION} authenticate' to re-authenticate`);
 }
 
 // MCP Server setup
@@ -208,12 +237,12 @@ async function startMcpServer(readOnly: boolean) {
           "⚠️  Warning: You authenticated with read-only scopes but the server is running in full mode."
         );
         console.error("   Write operations may fail. Re-authenticate without --read-only:");
-        console.error("   npx @floriscornel/teams-mcp@latest authenticate");
+        console.error(`   ${CLI_INVOCATION} authenticate`);
       } else if (!grantedScopes) {
         console.error(
           "⚠️  Warning: Could not determine granted scopes. If you experience permission errors,"
         );
-        console.error("   re-authenticate: npx @floriscornel/teams-mcp@latest authenticate");
+        console.error(`   re-authenticate: ${CLI_INVOCATION} authenticate`);
       }
     }
   }
@@ -234,15 +263,16 @@ async function startMcpServer(readOnly: boolean) {
 // Main function to handle both CLI and MCP server modes
 async function main() {
   const args = process.argv.slice(2);
-  const command = args.find((arg) => arg !== "--read-only");
+  const command = args.find((arg) => !arg.startsWith("--"));
 
   const readOnly = hasReadOnlyFlag(args) || process.env.TEAMS_MCP_READ_ONLY === "true";
+  const useDeviceCode = args.includes("--device-code");
 
   // CLI commands
   switch (command) {
     case "authenticate":
     case "auth":
-      await authenticate(readOnly);
+      await authenticate(readOnly, useDeviceCode);
       return;
     case "check":
       await checkAuth();
@@ -252,30 +282,30 @@ async function main() {
       return;
     case "help":
     case "--help":
-    case "-h":
+    case "-h": {
       console.log("Microsoft Graph MCP Server");
       console.log("");
       console.log("Usage:");
-      console.log(
-        "  npx @floriscornel/teams-mcp@latest authenticate              # Authenticate with full scopes"
-      );
-      console.log(
-        "  npx @floriscornel/teams-mcp@latest authenticate --read-only  # Authenticate with read-only scopes"
-      );
-      console.log(
-        "  npx @floriscornel/teams-mcp@latest check                     # Check authentication status"
-      );
-      console.log(
-        "  npx @floriscornel/teams-mcp@latest logout                    # Clear authentication"
-      );
-      console.log(
-        "  npx @floriscornel/teams-mcp@latest                           # Start MCP server (default)"
-      );
+      console.log(`  ${CLI_INVOCATION} <command> [--read-only]`);
+      console.log("");
+      console.log("Commands:");
+      const helpRows: [string, string][] = [
+        ["authenticate", "Authenticate (interactive browser, default)"],
+        ["authenticate --read-only", "Authenticate with read-only scopes"],
+        ["authenticate --device-code", "Authenticate via device code (no local browser)"],
+        ["check", "Check authentication status"],
+        ["logout", "Clear authentication"],
+        ["(no command)", "Start MCP server (default)"],
+      ];
+      for (const [cmd, desc] of helpRows) {
+        console.log(`  ${cmd.padEnd(28)} # ${desc}`);
+      }
       console.log("");
       console.log("Environment variables:");
       console.log("  TEAMS_MCP_READ_ONLY=true  # Start MCP server in read-only mode");
       console.log("  AUTH_TOKEN=<jwt>          # Use a pre-existing access token");
       return;
+    }
     case undefined:
       // No command = start MCP server
       await startMcpServer(readOnly);

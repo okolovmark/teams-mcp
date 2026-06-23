@@ -1,5 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { GraphService } from "../services/graph.js";
+import { CLI_INVOCATION, type GraphService } from "../services/graph.js";
 
 export function registerAuthTools(
   server: McpServer,
@@ -19,7 +19,7 @@ export function registerAuthTools(
             type: "text",
             text: status.isAuthenticated
               ? `✅ Authenticated as ${status.displayName || "Unknown User"} (${status.userPrincipalName || "No email available"})`
-              : "❌ Not authenticated. Please run: npx @floriscornel/teams-mcp@latest authenticate",
+              : `❌ Not authenticated. Please run: ${CLI_INVOCATION} authenticate`,
           },
         ],
       };
