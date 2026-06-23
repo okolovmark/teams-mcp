@@ -263,7 +263,10 @@ async function startMcpServer(readOnly: boolean) {
 // Main function to handle both CLI and MCP server modes
 async function main() {
   const args = process.argv.slice(2);
-  const command = args.find((arg) => !arg.startsWith("--"));
+  // Exclude only the real flags from command detection; help flags (--help/-h)
+  // must still resolve to the help command.
+  const FLAG_ARGS = new Set(["--read-only", "--device-code"]);
+  const command = args.find((arg) => !FLAG_ARGS.has(arg));
 
   const readOnly = hasReadOnlyFlag(args) || process.env.TEAMS_MCP_READ_ONLY === "true";
   const useDeviceCode = args.includes("--device-code");

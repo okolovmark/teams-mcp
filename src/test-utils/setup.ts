@@ -301,11 +301,6 @@ beforeEach(() => {
       },
     };
   });
-
-  // Mock Azure identity
-  vi.mock("@azure/identity", () => ({
-    DeviceCodeCredential: vi.fn(),
-  }));
 });
 
 afterEach(() => {
